@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="header.png" alt="Abraxas Labs — hyperswitch-payout-confirm-secret" width="100%">
+  <img src="header.png" alt="Abraxas Labs - hyperswitch-payout-confirm-secret" width="100%">
 </p>
 
 <p align="center">
@@ -14,155 +14,69 @@
 
 # hyperswitch-payout-confirm-secret
 
-**Hyperswitch** `2026.09.21.0` — Juspay
+**Hyperswitch** `2026.09.21.0` - Juspay
 
-Unpublished Hyperswitch source finding: POST /payouts/{id}/confirm with a publishable pk_ key only requires client_secret present, not equal to the stored payout secret, so a dummy secret can raise the stored amount. Payments confirm still compares the secret (IR_09). Amount is persisted before connector routing.
+[`payouts_confirm`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/routes/payouts.rs) authenticates `pk_` with [`check_value_present("client_secret")`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/services/authentication.rs). Present. Not equal. Payments confirm still binds: [`authenticate_client_secret`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/payments/helpers.rs) returns `IR_09` on mismatch. The confirm body is a full [`PayoutCreateRequest`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/api_models/src/payouts.rs). [`update_payouts_and_payout_attempt`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/payouts/helpers.rs) writes `amount` **before** connector routing.
+
+**Dummy `client_secret` plus `amount=99900` on payouts confirm stores 99900. Payments confirm with the same dummy is still IR_09.**
 
 | | |
 |---|---|
-| ID | Unpublished Hyperswitch source finding #2 (no CVE yet) |
-| CWE | [CWE-863, CWE-345](https://cwe.mitre.org/data/definitions/345.html) |
+| ID | no CVE yet |
+| CWE | [CWE-863](https://cwe.mitre.org/data/definitions/863.html), [CWE-345](https://cwe.mitre.org/data/definitions/345.html) |
 | CVSS | **High: 7.5** `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N` |
 | Product | [Hyperswitch](https://github.com/juspay/hyperswitch) |
-| Affected | all versions **through 2026.09.21.0** (inclusive) |
-| Patched | vendor patch — see references |
-| Auth | unauthenticated (see source map) |
+| Affected | through **2026.09.21.0** payouts confirm |
+| Auth | publishable `pk_` plus payout id; dummy secret |
 | License | [GNU Affero GPL v3.0](LICENSE) |
-| Lab | `127.0.0.1` only · vendor/client disclosure pack, not a scanner |
+| Lab | `127.0.0.1` only |
 
----
+## What an attacker can do
 
-## Advisory (from the source map)
+Need the publishable key (public, checkout) and the payout id (payout link, merchant dashboard, client create response). POST `/payouts/{id}/confirm` with a dummy secret and a new `amount`. Retrieve shows the raised amount even when connector routing returns **400 IR_39** (no eligible payout connector). The write already happened. Fulfillment on a shop that **has** a payout processor is the next step.
 
-routes/payouts.rs 160-173 confirm=true + check_sdk_auth_and_get_auth. authentication.rs 5907-5934 pk_ presence-only. helpers.rs 1465-1484 amount applied. core/payouts.rs 702 before 721. Payments authenticate_client_secret is the bound control.
+Guest without `pk_` is not this bug. Secret `sk_` confirm is merchant-side. Not a shell. Not a successful connector payout on this lab image.
 
----
+Same product as the [unsigned Worldpayxml webhook](https://github.com/abraxas/hyperswitch-unsigned-webhook). Different bug.
 
-## Entry
+## How I found it
 
-- **Method:** `POST`
-- **Path:** `/payouts/{payout_id}/confirm`
-- **Router:** payouts_confirm forces confirm=true. check_sdk_auth_and_get_auth for pk_ only check_value_present(client_secret). helpers.rs applies amount before payouts_core.
-- **Notes:** Unauthenticated unpublished Hyperswitch #2 CWE-863 2026.09.21.0. Needs merchant publishable key (pk_ on checkout) and payout_id. Witness: GET /payouts/{id} amount=99900. Payments confirm dummy secret is the control (IR_09). Not eval. Not a reverse shell. Disclose security@juspay.in, not a public GitHub issue.
+I read `check_value_present`, then payments `req_cs != pi_cs`, then `update_payouts_and_payout_attempt` before `payouts_core`. Auth for `pk_` is "checkout SDK." The secret is supposed to bind the browser session to **this** payout. Payments does equality. Payouts does presence. A non-empty dummy is enough. The JSON is still a create request, so `amount` is not a no-op on confirm.
 
-### Call chain
+The first client that looks at this will send confirm without `client_secret` and get `MissingRequiredField`. Present. Send the real secret and you are the payer. Send a dummy on **payments** confirm and you get IR_09. That is the control. Send the dummy on **payouts** confirm.
 
-- `POST /accounts admin_api_key=test_admin`
-- `POST /api_keys/{merchant_id}`
-- `POST /account/{merchant_id}/connectors worldpayxml payout_processor`
-- `POST /payouts/create confirm=false amount=1000 card PMD`
-- `POST /payments/{id}/confirm dummy client_secret (control, must be IR_09)`
-- `POST /payouts/{id}/confirm api-key=pk_ client_secret=dummy amount=99900`
-- `GET /payouts/{id} amount=99900`
+Wrong turns already recorded: treating HTTP 400 IR_39 as "nothing happened" (retrieve the payout); amount stays 1000 because confirm omitted `amount` (`unwrap_or` keeps the old value); payout already terminal (`Success` / `Failed` / `Cancelled`); a reverse shell. Theatre. The witness is retrieve **amount=99900** after dummy secret, with payments confirm still IR_09.
 
-### Lab preconditions
+Then: create a merchant, a secret key, a publishable `pk_`, a worldpayxml **payout** connector, and `POST /payouts/create` with `confirm=false` amount **1000**. RequiresConfirmation. Payments dummy-secret control. Payouts dummy 99900. Retrieve.
 
-- Hyperswitch v1 router, payouts enabled
-- Merchant publishable key pk_
-- Payout in RequiresConfirmation with payout_method_data
-- Amount write is the oracle even if connector routing returns IR_39
-
-### Witness
-
-GET /payouts/{id} amount=99900 after dummy client_secret confirm (created at 1000). Payments confirm dummy secret returns IR_09.
-
-### Not success
-
-- eval/base64/system payload
-- reverse shell
-- 401 unless client_secret matches payouts.client_secret
-- amount stays 1000
-
----
-
-## Patch / remediation
-
-**Do this first:** Apply the vendor patch for **Hyperswitch**. See references.
-
-**Verify after upgrade**
-
-- Re-run `hyperswitch-payout-confirm-secret-Abraxas-Labs.py` against the patched build: the mapped witness must **not** appear.
-- Confirm the vendor advisory / changeset in the deployed tree (see references).
-- A WAF signature is delay, not a patch.
-
-**If you cannot update immediately**
-
-- Disable or isolate the affected component.
-- Hunt for the witness condition on production (new privileged users, unexpected files, injected rows — whatever this CVE's map names).
-
----
-
-## Reproduction (authorized lab)
-
-Target **only** `http://127.0.0.1:18083` (or the loopback you bound). Do not point this script at the internet.
-
-```bash
-python3 hyperswitch-payout-confirm-secret-Abraxas-Labs.py
-```
-
-Success is the **witness** above in the response body. Generic 200 HTML is not it.
-
----
-
-## Lab images
-
-Loopback stack used to reproduce. Official images unless a `Dockerfile` in this folder builds from source.
-
-- [`lab/docker-compose.yml`](lab/docker-compose.yml)
-- [`lab/Dockerfile`](lab/Dockerfile)
-- [`lab/run.sh`](lab/run.sh)
-
-`./run.sh` clones Hyperswitch tag **2026.09.21.0** into `lab/hyperswitch-src` and starts `hyperswitch-router:standalone` on loopback `:18083`. Then:
+## Lab
 
 ```bash
 cd lab
 ./run.sh
 ```
 
-Publish nothing except `127.0.0.1`.
+Target **only** `http://127.0.0.1:18083`. Do not share a compose project with the webhook lab.
 
----
+```text
+IOC amount_before=1000 status_before=requires_confirmation
+IOC payments.confirm dummy-secret status=400 IR_09 client_secret mismatch
+IOC payouts.confirm dummy-secret status=400 IR_39 no eligible connector
+IOC retrieve amount=99900 status=requires_confirmation
+SUCCESS Hyperswitch payout confirm unbound client_secret amount raise
+```
+
+## The fix
+
+Compare `client_secret` to `payouts.client_secret` the way payments does, and do not apply `PayoutCreateRequest.amount` on confirm until that check passes. Dummy secret must be IR_09 (or 401), and retrieve amount must stay 1000.
 
 ## References
 
-- [github.com/juspay/hyperswitch](https://github.com/juspay/hyperswitch) tag 2026.09.21.0
-- Vendor intake: [security@juspay.in](mailto:security@juspay.in) ([VDP](https://github.com/juspay/hyperswitch/wiki/Vulnerability-Disclosure-Program)). Do **not** open a public GitHub issue.
-
-- Abraxas Labs: [abraxaslabs.tech](https://abraxaslabs.tech) · [github.com/abraxas](https://github.com/abraxas) · [@abraxas_null](https://x.com/abraxas_null)
-
----
-
-## Records (structured)
-
-```
-# Hyperswitch unpublished #2 — payout confirm unbound client_secret
-
-CWE: CWE-863, CWE-345
-Severity: High 7.5 (HTTP lab SUCCESS, 95%)
-
-## Description
-
-`POST /payouts/{id}/confirm` authenticates a publishable `pk_` key by requiring `client_secret` present, not equal to `payouts.client_secret`. The confirm body is a full `PayoutCreateRequest`, so `amount` is written in `update_payouts_and_payout_attempt` before connector routing. Payments confirm still binds the secret (`IR_09`).
-
-## Product
-
-Hyperswitch tag 2026.09.21.0 source; lab image `hyperswitch-router:standalone` v1.127.0. Oracle: retrieve amount 99900 after dummy `client_secret` (created at 1000). Confirm HTTP 400 `IR_39` (no eligible payout connector on this image) after the amount write.
-```
-
----
+- [github.com/juspay/hyperswitch](https://github.com/juspay/hyperswitch) tag [2026.09.21.0](https://github.com/juspay/hyperswitch/releases/tag/2026.09.21.0)
+- [`payouts.rs` routes](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/routes/payouts.rs) · [`authentication.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/services/authentication.rs) · [`payouts/helpers.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/payouts/helpers.rs) · [`core/payouts.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/payouts.rs) · [`payments/helpers.rs`](https://github.com/juspay/hyperswitch/blob/2026.09.21.0/crates/router/src/core/payments/helpers.rs)
+- Same product: [hyperswitch-unsigned-webhook](https://github.com/abraxas/hyperswitch-unsigned-webhook)
+- [CWE-863](https://cwe.mitre.org/data/definitions/863.html) · [CWE-345](https://cwe.mitre.org/data/definitions/345.html)
 
 ## License
 
-This disclosure pack is licensed under the **GNU Affero General Public License v3.0**. See [LICENSE](LICENSE).
-
----
-
-## Disclaimer
-
-This pack is for **the vendor, the site owner, and licensed labs**. The script talks to `127.0.0.1`. Using it against systems you do not own is not authorized by Abraxas Labs. No warranty.
-
-<p align="center">
-  <a href="https://abraxaslabs.tech">abraxaslabs.tech</a> ·
-  <a href="https://github.com/abraxas">github.com/abraxas</a> ·
-  <a href="https://x.com/abraxas_null">@abraxas_null</a>
-</p>
+GNU Affero GPL v3.0. See [LICENSE](LICENSE). Loopback lab only. No warranty.
