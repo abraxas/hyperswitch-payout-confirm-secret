@@ -13,6 +13,10 @@
   &nbsp;·&nbsp;
   <a href="https://github.com/abraxas/hyperswitch-payout-confirm-secret">hyperswitch-payout-confirm-secret</a>
 </p>
+<p align="center">
+  Write-up: <a href="https://abraxaslabs.tech/research/hyperswitch-payout-confirm-secret"><strong>https://abraxaslabs.tech/research/hyperswitch-payout-confirm-secret</strong></a>
+</p>
+
 
 # hyperswitch-payout-confirm-secret
 
